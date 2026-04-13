@@ -13,27 +13,8 @@
 
 set -euo pipefail
 
-if ! command -v jq >/dev/null 2>&1; then
-  printf '%s\n' "error: missing jq" >&2; exit 1
-fi
-
-CACHE="${CLAUDE_PROJECT_DIR:-.}/.claude/.simplify-ignore-cache"
-if [ -t 0 ]; then INPUT="{}"; else INPUT=$(cat); fi
-
-# Parse hook input — trap errors explicitly so set -e doesn't cause
-# a silent exit on malformed JSON, and surface a useful diagnostic.
-parse_error=""
-TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null) || {
-  parse_error="failed to parse .tool_name from hook input"
-  TOOL_NAME=""
-}
-FILE_PATH=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null) || {
-  parse_error="failed to parse .tool_input.file_path from hook input"
-  FILE_PATH=""
-}
-if [ -n "$parse_error" ]; then
-  printf 'Warning: %s (input: %.120s)\n' "$parse_error" "$INPUT" >&2
-fi
+# Allow test scripts to override CACHE via environment variable
+CACHE="${CACHE:-${CLAUDE_PROJECT_DIR:-.}/.claude/.simplify-ignore-cache}"
 
 hash_cmd() {
   if command -v shasum >/dev/null 2>&1; then shasum
@@ -141,6 +122,30 @@ ${line}"
   [ $count -gt 0 ] && return 0 || return 1
 }
 
+# ── Hook execution logic (only when run directly, not sourced) ────────────────
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+
+if ! command -v jq >/dev/null 2>&1; then
+  printf '%s\n' "error: missing jq" >&2; exit 1
+fi
+
+if [ -t 0 ]; then INPUT="{}"; else INPUT=$(cat); fi
+
+# Parse hook input — trap errors explicitly so set -e doesn't cause
+# a silent exit on malformed JSON, and surface a useful diagnostic.
+parse_error=""
+TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null) || {
+  parse_error="failed to parse .tool_name from hook input"
+  TOOL_NAME=""
+}
+FILE_PATH=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null) || {
+  parse_error="failed to parse .tool_input.file_path from hook input"
+  FILE_PATH=""
+}
+if [ -n "$parse_error" ]; then
+  printf 'Warning: %s (input: %.120s)\n' "$parse_error" "$INPUT" >&2
+fi
+
 # ── Stop: restore all files from backup ───────────────────────────────────────
 if [ -z "$TOOL_NAME" ]; then
   [ -d "$CACHE" ] || exit 0
@@ -203,8 +208,7 @@ if [ "$TOOL_NAME" = "Read" ]; then
   printf '%s' "$FILE_PATH" > "$CACHE/${ID}.path"
 
   # Filter in-place (cat > preserves inode and permissions)
-  FILTERED="$CACHE/${ID}.$$.tmp"
-  rm -f "$FILTERED"
+  FILTERED=$(mktemp "${CACHE}/${ID}.XXXXXX.tmp")
   if filter_file "$FILE_PATH" "$FILTERED" "$ID"; then
     cat "$FILTERED" > "$FILE_PATH"
     rm -f "$FILTERED"
@@ -222,8 +226,7 @@ if [ "$TOOL_NAME" = "Edit" ] || [ "$TOOL_NAME" = "Write" ]; then
   ls "$CACHE/${ID}".block.* >/dev/null 2>&1 || exit 0
 
   # Expand placeholders, preserving any inline code the model added around them
-  EXPANDED="$CACHE/${ID}.$$.expanded"
-  rm -f "$EXPANDED"
+  EXPANDED=$(mktemp "${CACHE}/${ID}.XXXXXX.expanded")
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in *BLOCK_*)
       # Expand all placeholders on this line (supports multiple per line)
@@ -291,8 +294,7 @@ if [ "$TOOL_NAME" = "Edit" ] || [ "$TOOL_NAME" = "Write" ]; then
   cp "$FILE_PATH" "$CACHE/${ID}.bak"
 
   # Re-filter in-place so the file on disk stays with placeholders
-  FILTERED="$CACHE/${ID}.$$.tmp"
-  rm -f "$FILTERED"
+  FILTERED=$(mktemp "${CACHE}/${ID}.XXXXXX.tmp")
   if filter_file "$FILE_PATH" "$FILTERED" "$ID"; then
     cat "$FILTERED" > "$FILE_PATH"
     rm -f "$FILTERED"
@@ -300,3 +302,5 @@ if [ "$TOOL_NAME" = "Edit" ] || [ "$TOOL_NAME" = "Write" ]; then
 
   exit 0
 fi
+
+fi # end main guard
